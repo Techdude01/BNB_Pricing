@@ -1,3 +1,30 @@
+## Environment Setup (Conda)
+
+```bash
+conda env create -f environment.yml
+conda activate ml-optimized
+python -m ipykernel install --user --name ml-optimized --display-name "ml-optimized"
+```
+
+Use the `ml-optimized` kernel when running:
+- `notebooks/01_data_and_split.ipynb`
+- `notebooks/02_train_and_compare.ipynb`
+
+Model artifacts are written to `artifacts/` by default from notebook 02.
+
+## Training Modes
+
+Use `sample` for fast iteration and `full` for heavier tuning.
+
+- Notebook (`notebooks/02_train_and_compare.ipynb`)
+  - Set `MODE = "sample"` or `MODE = "full"` in the config cell.
+  - `sample` uses fewer trials and a 35% training subset.
+  - `full` uses full training data and default config trial counts.
+- CLI (`pricing_lab/run_all.py`)
+  - Fast: `python -m pricing_lab.run_all --mode sample`
+  - Heavy: `python -m pricing_lab.run_all --mode full`
+  - Optional overrides still work: `--n-trials-elastic`, `--n-trials-knn`, `--n-trials-xgb`
+
 ## Fun Facts
 
 - 'Michael' manages 383 listings, more than many boutique hotel chains.
