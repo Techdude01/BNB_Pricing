@@ -9,6 +9,7 @@ python -m ipykernel install --user --name ml-optimized --display-name "ml-optimi
 Use the `ml-optimized` kernel when running:
 - `notebooks/01_data_and_split.ipynb`
 - `notebooks/02_train_and_compare.ipynb`
+- `notebooks/03_analyze.ipynb`
 
 Model artifacts are written to `artifacts/` by default from notebook 02.
 
@@ -20,10 +21,36 @@ Use `sample` for fast iteration and `full` for heavier tuning.
   - Set `MODE = "sample"` or `MODE = "full"` in the config cell.
   - `sample` uses fewer trials and a 35% training subset.
   - `full` uses full training data and default config trial counts.
+  - Granular retraining flags control each model independently:
+    - Base: `RETRAIN_ELASTICNET`, `RETRAIN_KNN`, `RETRAIN_XGBOOST`, `RETRAIN_RANDOM_FOREST`, `RETRAIN_SVM`, `RETRAIN_NEURAL_NETWORK`
+    - Ensemble: `RETRAIN_VOTING_EQUAL`, `RETRAIN_VOTING_WEIGHTED`, `RETRAIN_STACKING`
+  - Ensembles are resolved after base models, using selected base candidates.
 - CLI (`pricing_lab/run_all.py`)
   - Fast: `python -m pricing_lab.run_all --mode sample`
   - Heavy: `python -m pricing_lab.run_all --mode full`
   - Optional overrides still work: `--n-trials-elastic`, `--n-trials-knn`, `--n-trials-xgb`
+
+## Analysis Notebook
+
+Use `notebooks/03_analyze.ipynb` for post-training diagnostics and explainability.
+
+- Expected run order:
+  - Run `notebooks/02_train_and_compare.ipynb` first to create `artifacts/*.joblib`.
+  - Then run `notebooks/03_analyze.ipynb` with `RUN_TRAINING=False` for fast analysis-only reruns.
+- Included outputs:
+  - Actual vs Predicted plots (per model)
+  - Residuals vs Predicted plots (per model)
+  - Residual density overlay
+  - Residual histograms
+  - MAE/RMSE bars and R² bar
+  - Absolute error quantile curves
+  - SHAP bar/beeswarm/dependence (XGBoost)
+  - Permutation importance for all models
+  - Optional model-agnostic SHAP for selected non-tree models
+- Exports:
+  - `artifacts/shap_feature_importance_xgboost.csv`
+  - `artifacts/permutation_importance_all_models.csv`
+  - Optional plot images in `artifacts/plots/` when `SAVE_PLOTS=True`
 
 ## Fun Facts
 
