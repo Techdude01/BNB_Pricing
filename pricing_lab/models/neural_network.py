@@ -48,7 +48,7 @@ def build_neural_network_pipeline(trial: optuna.Trial, enable_early_stopping: bo
     learning_rate_init: float = trial.suggest_float("learning_rate_init", 1e-5, 1e-2, log=True)
     max_iter: int = trial.suggest_int("max_iter", 600, 2500, step=200)
     activation: str = trial.suggest_categorical("activation", ["relu", "tanh"])
-    solver: str = trial.suggest_categorical("solver", ["adam", "sgd"])
+    solver: str = "adam"
     batch_size: int = trial.suggest_categorical("batch_size", [64, 128, 256])
     return Pipeline(
         steps=[

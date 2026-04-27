@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
@@ -12,15 +13,36 @@ from sklearn.preprocessing import OneHotEncoder
 from pricing_lab import config
 
 COLUMNS_TO_DROP: list[str] = ["id", "name", "host_id", "host_name", "last_review"]
-CATEGORICAL_FEATURES: list[str] = ["neighbourhood_group", "neighbourhood", "room_type"]
+CATEGORICAL_FEATURES: list[str] = [
+    "neighbourhood_group",
+    "neighbourhood",
+    "room_type",
+    "availability_bucket",
+    "minimum_nights_bucket",
+    "host_listing_count_bucket",
+    "review_recency_bucket",
+    "geo_cell",
+    "room_type_neighbourhood_group",
+    "room_type_availability_bucket",
+]
+TARGET_ENCODED_FEATURES: list[str] = [
+    "neighbourhood",
+    "geo_cell",
+    "room_type_neighbourhood_group",
+]
 NUMERIC_FEATURES: list[str] = [
     "latitude",
     "longitude",
     "minimum_nights",
+    "log_minimum_nights",
     "number_of_reviews",
     "reviews_per_month",
     "calculated_host_listings_count",
+    "log_host_listing_count",
     "availability_365",
+    "has_reviews",
+    "days_since_last_review",
+    "is_long_stay",
 ]
 
 
@@ -32,6 +54,96 @@ class TrainTestData:
     X_test: pd.DataFrame
     y_train: pd.Series
     y_test: pd.Series
+
+
+class TargetMeanEncoder(BaseEstimator, TransformerMixin):
+    """Encode categorical columns with smoothed target means inside CV folds."""
+
+    def __init__(self, smoothing: float = 10.0) -> None:
+        self.smoothing = smoothing
+
+    def fit(self, X: object, y: object) -> "TargetMeanEncoder":
+        data_frame: pd.DataFrame = self._to_frame(X)
+        target_series: pd.Series = pd.Series(y).reset_index(drop=True)
+        self.global_mean_ = float(target_series.mean())
+        self.feature_maps_: dict[str, dict[object, float]] = {}
+        for column_name in data_frame.columns:
+            grouped = target_series.groupby(data_frame[column_name], dropna=False).agg(["mean", "count"])
+            smoothed = (
+                grouped["mean"] * grouped["count"] + self.global_mean_ * self.smoothing
+            ) / (grouped["count"] + self.smoothing)
+            self.feature_maps_[column_name] = smoothed.to_dict()
+        return self
+
+    def transform(self, X: object) -> np.ndarray:
+        data_frame: pd.DataFrame = self._to_frame(X)
+        encoded_columns: list[np.ndarray] = []
+        for column_name in data_frame.columns:
+            feature_map = self.feature_maps_.get(column_name, {})
+            encoded = data_frame[column_name].map(feature_map).fillna(self.global_mean_)
+            encoded_columns.append(encoded.to_numpy(dtype=np.float64))
+        return np.column_stack(encoded_columns)
+
+    def get_feature_names_out(self, input_features: object = None) -> np.ndarray:
+        feature_names = list(input_features) if input_features is not None else list(self.feature_maps_)
+        return np.asarray([f"{feature_name}_target_mean" for feature_name in feature_names], dtype=object)
+
+    @staticmethod
+    def _to_frame(X: object) -> pd.DataFrame:
+        if isinstance(X, pd.DataFrame):
+            return X.reset_index(drop=True)
+        return pd.DataFrame(X)
+
+
+def _build_review_recency_features(model_data_frame: pd.DataFrame) -> pd.DataFrame:
+    review_dates: pd.Series = pd.to_datetime(model_data_frame["last_review"], errors="coerce")
+    latest_review_date = review_dates.max()
+    fallback_days = 3650
+    if pd.isna(latest_review_date):
+        model_data_frame["days_since_last_review"] = fallback_days
+    else:
+        days_since_review = (latest_review_date - review_dates).dt.days
+        model_data_frame["days_since_last_review"] = days_since_review.fillna(fallback_days).clip(lower=0)
+    model_data_frame["has_reviews"] = (model_data_frame["number_of_reviews"] > 0).astype(int)
+    model_data_frame["review_recency_bucket"] = pd.cut(
+        model_data_frame["days_since_last_review"],
+        bins=[-1, 30, 180, 365, fallback_days + 1],
+        labels=["last_30_days", "last_6_months", "last_year", "older_or_none"],
+    ).astype(str)
+    return model_data_frame
+
+
+def add_engineered_features(model_data_frame: pd.DataFrame) -> pd.DataFrame:
+    """Add leakage-safe listing features derived only from listing attributes."""
+    model_data_frame = _build_review_recency_features(model_data_frame)
+    model_data_frame["log_minimum_nights"] = np.log1p(model_data_frame["minimum_nights"])
+    model_data_frame["is_long_stay"] = (model_data_frame["minimum_nights"] >= 30).astype(int)
+    model_data_frame["minimum_nights_bucket"] = pd.cut(
+        model_data_frame["minimum_nights"],
+        bins=[0, 1, 3, 7, 30, np.inf],
+        labels=["one_night", "two_to_three", "four_to_seven", "eight_to_thirty", "over_thirty"],
+    ).astype(str)
+    model_data_frame["availability_bucket"] = pd.cut(
+        model_data_frame["availability_365"],
+        bins=[-1, 0, 30, 180, 365],
+        labels=["unavailable", "low", "seasonal", "high"],
+    ).astype(str)
+    model_data_frame["log_host_listing_count"] = np.log1p(model_data_frame["calculated_host_listings_count"])
+    model_data_frame["host_listing_count_bucket"] = pd.cut(
+        model_data_frame["calculated_host_listings_count"],
+        bins=[0, 1, 5, 20, np.inf],
+        labels=["single_listing", "small_portfolio", "medium_portfolio", "large_portfolio"],
+    ).astype(str)
+    model_data_frame["geo_cell"] = (
+        model_data_frame["latitude"].round(2).astype(str) + "_" + model_data_frame["longitude"].round(2).astype(str)
+    )
+    model_data_frame["room_type_neighbourhood_group"] = (
+        model_data_frame["room_type"].astype(str) + "__" + model_data_frame["neighbourhood_group"].astype(str)
+    )
+    model_data_frame["room_type_availability_bucket"] = (
+        model_data_frame["room_type"].astype(str) + "__" + model_data_frame["availability_bucket"].astype(str)
+    )
+    return model_data_frame
 
 
 def clean_listings_dataframe(raw_data_frame: pd.DataFrame) -> pd.DataFrame:
@@ -48,6 +160,7 @@ def clean_listings_dataframe(raw_data_frame: pd.DataFrame) -> pd.DataFrame:
     interquartile_range: float = third_quartile - first_quartile
     upper_bound: float = third_quartile + 1.5 * interquartile_range
     model_data_frame = model_data_frame[model_data_frame["price"] <= upper_bound].copy()
+    model_data_frame = add_engineered_features(model_data_frame)
     existing_columns_to_drop: list[str] = [
         column_name for column_name in COLUMNS_TO_DROP if column_name in model_data_frame.columns
     ]
@@ -91,10 +204,11 @@ def load_train_test(
 
 
 def build_column_transformer() -> ColumnTransformer:
-    """One-hot categoricals; pass numeric columns through unchanged."""
+    """One-hot categoricals, target-encode high-cardinality groups, and pass numerics."""
     categorical_transformer = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     transformers: list = [
         ("categorical", categorical_transformer, CATEGORICAL_FEATURES),
+        ("target_mean", TargetMeanEncoder(), TARGET_ENCODED_FEATURES),
         ("numeric", "passthrough", NUMERIC_FEATURES),
     ]
     return ColumnTransformer(transformers=transformers, remainder="drop", verbose_feature_names_out=False)
