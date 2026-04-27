@@ -1,2 +1,5 @@
 
 artifacts/
+
+.tmp_nb_calls
+.vs_code
