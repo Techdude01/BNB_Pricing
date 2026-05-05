@@ -23,7 +23,7 @@ def mean_cv_rmse_log(
         y,
         cv=cv,
         scoring="neg_root_mean_squared_error",
-        n_jobs=-1,
+        n_jobs=1,
         error_score="raise",
     )
     # sklearn returns negative losses for minimization-compatible scoring APIs.

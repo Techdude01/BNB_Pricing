@@ -1,5 +1,11 @@
-
 artifacts/
 
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
 .tmp_nb_calls
+.vscode/
 .vs_code

@@ -1,10 +1,13 @@
 """ElasticNet with Optuna over alpha, l1_ratio, and max_iter."""
 
+import warnings
 from dataclasses import dataclass
 
+import numpy as np
 import optuna
 from sklearn.linear_model import ElasticNet
 from sklearn.pipeline import Pipeline
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import StandardScaler
 
 from pricing_lab import config
@@ -26,9 +29,10 @@ class ElasticNetResult:
 
 def build_elastic_net_pipeline(trial: optuna.Trial) -> Pipeline:
     """Sample hyperparameters from Optuna and return an unfitted pipeline."""
-    alpha: float = trial.suggest_float("alpha", 1e-5, 10.0, log=True)
+    alpha: float = trial.suggest_float("alpha", 1e-4, 10.0, log=True)
     l1_ratio: float = trial.suggest_float("l1_ratio", 0.0, 1.0)
-    max_iter: int = trial.suggest_int("max_iter", 2000, 15000, step=500)
+    max_iter: int = trial.suggest_int("max_iter", 10000, 60000, step=5000)
+    tol: float = trial.suggest_float("tol", 1e-4, 1e-2, log=True)
     return Pipeline(
         steps=[
             ("prep", build_column_transformer()),
@@ -39,6 +43,8 @@ def build_elastic_net_pipeline(trial: optuna.Trial) -> Pipeline:
                     alpha=alpha,
                     l1_ratio=l1_ratio,
                     max_iter=max_iter,
+                    tol=tol,
+                    selection="random",
                     random_state=config.RANDOM_STATE,
                 ),
             ),
@@ -58,6 +64,8 @@ def build_elastic_net_pipeline_from_params(params: dict[str, float | int]) -> Pi
                     alpha=float(params["alpha"]),
                     l1_ratio=float(params["l1_ratio"]),
                     max_iter=int(params["max_iter"]),
+                    tol=float(params.get("tol", 1e-3)),
+                    selection="random",
                     random_state=config.RANDOM_STATE,
                 ),
             ),
@@ -72,7 +80,12 @@ def tune_elastic_net(data: TrainTestData, n_trials: int | None = None) -> Elasti
 
     def objective(trial: optuna.Trial) -> float:
         pipeline: Pipeline = build_elastic_net_pipeline(trial)
-        return mean_cv_rmse_log(pipeline, data.X_train, data.y_train)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=ConvergenceWarning)
+            try:
+                return mean_cv_rmse_log(pipeline, data.X_train, data.y_train)
+            except ConvergenceWarning:
+                return float(np.inf)
 
     study.optimize(objective, n_trials=trials, show_progress_bar=False)
     # Refit once on full training data after CV-based hyperparameter selection.

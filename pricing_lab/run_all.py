@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import optuna
 import pandas as pd
 from joblib import dump
@@ -32,8 +34,18 @@ from pricing_lab.models.random_forest import RandomForestResult, tune_random_for
 from pricing_lab.models.svm import SvmResult, tune_svm
 from pricing_lab.models.xgboost_model import XgboostResult, tune_xgboost
 
-TRAINING_MODES: tuple[str, str] = ("sample", "full")
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
+
+TRAINING_MODES: tuple[str, str, str] = ("lite", "sample", "full")
+LITE_TRAIN_ROWS: int = 800
 SAMPLE_TRAIN_FRACTION: float = 0.35
+LITE_TRIALS_ELASTIC: int = 1
+LITE_TRIALS_KNN: int = 1
+LITE_TRIALS_XGB: int = 1
+LITE_TRIALS_SVM: int = 1
+LITE_TRIALS_NN: int = 1
+LITE_TRIALS_RF: int = 1
+LITE_TRIALS_ENSEMBLE_WEIGHTS: int = 1
 SAMPLE_TRIALS_ELASTIC: int = 10
 SAMPLE_TRIALS_KNN: int = 6
 SAMPLE_TRIALS_XGB: int = 14
@@ -42,6 +54,17 @@ SAMPLE_TRIALS_NN: int = 8
 SAMPLE_TRIALS_RF: int = 10
 SAMPLE_TRIALS_ENSEMBLE_WEIGHTS: int = 15
 ENSEMBLE_CV_WINDOW: float = 0.03
+ARTIFACT_FILENAMES: dict[str, str] = {
+    "ElasticNet": "elastic_net.joblib",
+    "KNN": "knn.joblib",
+    "XGBoost": "xgboost.joblib",
+    "SVM": "svm.joblib",
+    "NeuralNetwork": "neural_network.joblib",
+    "RandomForest": "random_forest.joblib",
+    "VotingEnsembleEqual": "voting_ensemble_equal.joblib",
+    "VotingEnsembleWeighted": "voting_ensemble_weighted.joblib",
+    "StackingEnsemble": "stacking_ensemble.joblib",
+}
 
 
 def _result_row(
@@ -62,153 +85,126 @@ def _result_row(
     }
 
 
-def _collect_rows(
-    elastic: ElasticNetResult,
-    knn: KnnResult,
-    xgb: XgboostResult,
-    svm: SvmResult,
-    neural_network: NeuralNetworkResult,
-    random_forest: RandomForestResult,
-    voting_equal: EnsembleResult,
-    voting_weighted: EnsembleResult,
-    stacking: EnsembleResult,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = [
+def _collect_rows(results: list[Any]) -> list[dict[str, Any]]:
+    return [
         _result_row(
-            elastic.name,
-            elastic.best_cv_rmse_log,
-            elastic.test_metrics["mae"],
-            elastic.test_metrics["rmse"],
-            elastic.test_metrics["r2"],
-            elastic.best_params,
-        ),
-        _result_row(
-            knn.name,
-            knn.best_cv_rmse_log,
-            knn.test_metrics["mae"],
-            knn.test_metrics["rmse"],
-            knn.test_metrics["r2"],
-            knn.best_params,
-        ),
-        _result_row(
-            xgb.name,
-            xgb.best_cv_rmse_log,
-            xgb.test_metrics["mae"],
-            xgb.test_metrics["rmse"],
-            xgb.test_metrics["r2"],
-            xgb.best_params,
-        ),
-        _result_row(
-            svm.name,
-            svm.best_cv_rmse_log,
-            svm.test_metrics["mae"],
-            svm.test_metrics["rmse"],
-            svm.test_metrics["r2"],
-            svm.best_params,
-        ),
-        _result_row(
-            neural_network.name,
-            neural_network.best_cv_rmse_log,
-            neural_network.test_metrics["mae"],
-            neural_network.test_metrics["rmse"],
-            neural_network.test_metrics["r2"],
-            neural_network.best_params,
-        ),
-        _result_row(
-            random_forest.name,
-            random_forest.best_cv_rmse_log,
-            random_forest.test_metrics["mae"],
-            random_forest.test_metrics["rmse"],
-            random_forest.test_metrics["r2"],
-            random_forest.best_params,
-        ),
-        _result_row(
-            voting_equal.name,
-            voting_equal.best_cv_rmse_log,
-            voting_equal.test_metrics["mae"],
-            voting_equal.test_metrics["rmse"],
-            voting_equal.test_metrics["r2"],
-            voting_equal.best_params,
-        ),
-        _result_row(
-            voting_weighted.name,
-            voting_weighted.best_cv_rmse_log,
-            voting_weighted.test_metrics["mae"],
-            voting_weighted.test_metrics["rmse"],
-            voting_weighted.test_metrics["r2"],
-            voting_weighted.best_params,
-        ),
-        _result_row(
-            stacking.name,
-            stacking.best_cv_rmse_log,
-            stacking.test_metrics["mae"],
-            stacking.test_metrics["rmse"],
-            stacking.test_metrics["r2"],
-            stacking.best_params,
-        ),
+            result.name,
+            result.best_cv_rmse_log,
+            result.test_metrics["mae"],
+            result.test_metrics["rmse"],
+            result.test_metrics["r2"],
+            result.best_params,
+        )
+        for result in results
     ]
-    return rows
 
 
 def _save_model_artifacts(
     output_dir: str,
-    elastic: ElasticNetResult,
-    knn: KnnResult,
-    xgb: XgboostResult,
-    svm: SvmResult,
-    neural_network: NeuralNetworkResult,
-    random_forest: RandomForestResult,
-    voting_equal: EnsembleResult,
-    voting_weighted: EnsembleResult,
-    stacking: EnsembleResult,
+    results: list[Any],
 ) -> None:
     artifacts_dir: Path = Path(output_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    # Keep artifact naming/order aligned with summary table model order.
-    elastic_path: Path = artifacts_dir / "elastic_net.joblib"
-    knn_path: Path = artifacts_dir / "knn.joblib"
-    xgb_path: Path = artifacts_dir / "xgboost.joblib"
-    svm_path: Path = artifacts_dir / "svm.joblib"
-    neural_network_path: Path = artifacts_dir / "neural_network.joblib"
-    random_forest_path: Path = artifacts_dir / "random_forest.joblib"
-    voting_equal_path: Path = artifacts_dir / "voting_ensemble_equal.joblib"
-    voting_weighted_path: Path = artifacts_dir / "voting_ensemble_weighted.joblib"
-    stacking_path: Path = artifacts_dir / "stacking_ensemble.joblib"
-    dump(elastic.pipeline, elastic_path)
-    dump(knn.pipeline, knn_path)
-    dump(xgb.pipeline, xgb_path)
-    dump(svm.pipeline, svm_path)
-    dump(neural_network.pipeline, neural_network_path)
-    dump(random_forest.pipeline, random_forest_path)
-    dump(voting_equal.pipeline, voting_equal_path)
-    dump(voting_weighted.pipeline, voting_weighted_path)
-    dump(stacking.pipeline, stacking_path)
-    print(f"Wrote {elastic_path}", flush=True)
-    print(f"Wrote {knn_path}", flush=True)
-    print(f"Wrote {xgb_path}", flush=True)
-    print(f"Wrote {svm_path}", flush=True)
-    print(f"Wrote {neural_network_path}", flush=True)
-    print(f"Wrote {random_forest_path}", flush=True)
-    print(f"Wrote {voting_equal_path}", flush=True)
-    print(f"Wrote {voting_weighted_path}", flush=True)
-    print(f"Wrote {stacking_path}", flush=True)
+    for result in results:
+        artifact_path = artifacts_dir / ARTIFACT_FILENAMES[result.name]
+        dump(result.pipeline, artifact_path)
+        print(f"Wrote {artifact_path}", flush=True)
 
 
-def _resolve_trials(arg_value: int | None, sample_default: int, full_default: int, mode: str) -> int:
+def _resolve_trials(
+    arg_value: int | None,
+    lite_default: int,
+    sample_default: int,
+    full_default: int,
+    mode: str,
+) -> int:
     if arg_value is not None:
         return arg_value
+    if mode == "lite":
+        return lite_default
     if mode == "sample":
         return sample_default
     return full_default
 
 
-def _build_training_data(mode: str, data: TrainTestData) -> TrainTestData:
+def _representative_train_sample(
+    data: TrainTestData,
+    target_rows: int = LITE_TRAIN_ROWS,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Sample train rows across price bands, boroughs, and room types."""
+    sample_size = min(target_rows, len(data.X_train))
+    if sample_size == len(data.X_train):
+        return data.X_train.copy(), data.y_train.copy()
+
+    strata_frame = data.X_train[["neighbourhood_group", "room_type"]].copy()
+    strata_frame["price_band"] = pd.qcut(data.y_train, q=5, labels=False, duplicates="drop").astype(str)
+    strata = (
+        strata_frame["neighbourhood_group"].astype(str)
+        + "__"
+        + strata_frame["room_type"].astype(str)
+        + "__p"
+        + strata_frame["price_band"].astype(str)
+    )
+    row_frame = pd.DataFrame({"stratum": strata}, index=data.X_train.index)
+    stratum_counts = row_frame["stratum"].value_counts()
+    # Proportional allocation keeps lite mode small without losing key price/location/room segments.
+    exact_allocations = (stratum_counts / len(row_frame)) * sample_size
+    allocations = np.floor(exact_allocations).astype(int)
+    allocations = allocations.clip(upper=stratum_counts)
+
+    remaining_rows = sample_size - int(allocations.sum())
+    if remaining_rows > 0:
+        fractional_remainders = (exact_allocations - np.floor(exact_allocations)).sort_values(ascending=False)
+        for stratum_name in fractional_remainders.index:
+            if remaining_rows <= 0:
+                break
+            if allocations[stratum_name] >= stratum_counts[stratum_name]:
+                continue
+            allocations[stratum_name] += 1
+            remaining_rows -= 1
+
+    sampled_indices: list[int] = []
+    for stratum_name, rows_to_sample in allocations.items():
+        if rows_to_sample <= 0:
+            continue
+        stratum_indices = row_frame.index[row_frame["stratum"] == stratum_name]
+        sampled = pd.Series(stratum_indices).sample(
+            n=int(rows_to_sample),
+            random_state=config.RANDOM_STATE,
+        )
+        sampled_indices.extend(sampled.tolist())
+
+    if len(sampled_indices) < sample_size:
+        remaining_index = data.X_train.index.difference(pd.Index(sampled_indices))
+        extra_indices = pd.Series(remaining_index).sample(
+            n=sample_size - len(sampled_indices),
+            random_state=config.RANDOM_STATE,
+        )
+        sampled_indices.extend(extra_indices.tolist())
+
+    sampled_features = data.X_train.loc[sampled_indices].sample(frac=1.0, random_state=config.RANDOM_STATE)
+    sampled_target = data.y_train.loc[sampled_features.index]
+    return sampled_features, sampled_target
+
+
+def _build_training_data(mode: str, data: TrainTestData, lite_train_rows: int = LITE_TRAIN_ROWS) -> TrainTestData:
     if mode == "full":
         return data
-    sample_features: pd.DataFrame = data.X_train.sample(
-        frac=SAMPLE_TRAIN_FRACTION,
-        random_state=config.RANDOM_STATE,
-    )
+    if mode == "lite":
+        sample_features, sample_target = _representative_train_sample(data, target_rows=lite_train_rows)
+        sampled_rows = len(sample_features)
+        print(
+            f"Lite mode: using {sampled_rows} / {len(data.X_train)} train rows "
+            "with stratified price-band/borough/room-type sampling for Optuna + fit.",
+            flush=True,
+        )
+        return TrainTestData(
+            X_train=sample_features.reset_index(drop=True),
+            X_test=data.X_test,
+            y_train=sample_target.reset_index(drop=True),
+            y_test=data.y_test,
+        )
+    sample_features = data.X_train.sample(frac=SAMPLE_TRAIN_FRACTION, random_state=config.RANDOM_STATE)
     sample_target = data.y_train.loc[sample_features.index]
     sampled_rows: int = len(sample_features)
     print(
@@ -240,9 +236,15 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         type=str,
-        default="sample",
+        default="lite",
         choices=TRAINING_MODES,
-        help="Training mode: sample (fast iteration) or full (heavier search).",
+        help="Training mode: lite (fast representative smoke), sample (fast iteration), or full (heavier search).",
+    )
+    parser.add_argument(
+        "--lite-train-rows",
+        type=int,
+        default=LITE_TRAIN_ROWS,
+        help=f"Number of representative train rows for lite mode (default: {LITE_TRAIN_ROWS}).",
     )
     parser.add_argument(
         "--n-trials-elastic",
@@ -304,45 +306,54 @@ def main() -> None:
     full_data: TrainTestData = load_train_test(csv_path=args.csv)
     print(f"Mode: {args.mode}", flush=True)
     print(f"Train rows: {len(full_data.X_train)}, test rows: {len(full_data.X_test)}", flush=True)
-    train_data: TrainTestData = _build_training_data(args.mode, full_data)
+    if args.lite_train_rows <= 0:
+        raise ValueError("--lite-train-rows must be positive.")
+    train_data: TrainTestData = _build_training_data(args.mode, full_data, lite_train_rows=args.lite_train_rows)
     elastic_trials: int = _resolve_trials(
         args.n_trials_elastic,
+        LITE_TRIALS_ELASTIC,
         SAMPLE_TRIALS_ELASTIC,
         config.N_TRIALS_ELASTICNET,
         args.mode,
     )
     knn_trials: int = _resolve_trials(
         args.n_trials_knn,
+        LITE_TRIALS_KNN,
         SAMPLE_TRIALS_KNN,
         config.N_TRIALS_KNN,
         args.mode,
     )
     xgb_trials: int = _resolve_trials(
         args.n_trials_xgb,
+        LITE_TRIALS_XGB,
         SAMPLE_TRIALS_XGB,
         config.N_TRIALS_XGBOOST,
         args.mode,
     )
     svm_trials: int = _resolve_trials(
         args.n_trials_svm,
+        LITE_TRIALS_SVM,
         SAMPLE_TRIALS_SVM,
         config.N_TRIALS_SVM,
         args.mode,
     )
     nn_trials: int = _resolve_trials(
         args.n_trials_nn,
+        LITE_TRIALS_NN,
         SAMPLE_TRIALS_NN,
         config.N_TRIALS_NEURAL_NETWORK,
         args.mode,
     )
     rf_trials: int = _resolve_trials(
         args.n_trials_rf,
+        LITE_TRIALS_RF,
         SAMPLE_TRIALS_RF,
         config.N_TRIALS_RANDOM_FOREST,
         args.mode,
     )
     ensemble_weight_trials: int = _resolve_trials(
         args.n_trials_ensemble_weights,
+        LITE_TRIALS_ENSEMBLE_WEIGHTS,
         SAMPLE_TRIALS_ENSEMBLE_WEIGHTS,
         35,
         args.mode,
@@ -382,6 +393,7 @@ def main() -> None:
         "nn": neural_network_result.best_cv_rmse_log,
         "rf": random_forest_result.best_cv_rmse_log,
     }
+    # Keep ensembles focused on base models close to the best CV score, with a two-model minimum.
     selected_pipelines = select_ensemble_candidates(
         base_pipelines,
         base_cv_scores,
@@ -401,8 +413,7 @@ def main() -> None:
     )
     print("Fitting stacking ensemble...", flush=True)
     stacking_result: EnsembleResult = fit_stacking_ensemble(train_data, selected_pipelines)
-    # Aggregate and display metrics before any optional persistence.
-    rows: list[dict[str, Any]] = _collect_rows(
+    ordered_results: list[Any] = [
         elastic_result,
         knn_result,
         xgb_result,
@@ -412,25 +423,16 @@ def main() -> None:
         voting_equal_result,
         voting_weighted_result,
         stacking_result,
-    )
+    ]
+    # Aggregate and display metrics before any optional persistence.
+    rows: list[dict[str, Any]] = _collect_rows(ordered_results)
     table: pd.DataFrame = pd.DataFrame(rows)
     print(table.to_string(index=False), flush=True)
     if args.output_csv is not None:
         table.to_csv(args.output_csv, index=False)
         print(f"Wrote {args.output_csv}", flush=True)
     if args.model_output_dir is not None:
-        _save_model_artifacts(
-            args.model_output_dir,
-            elastic_result,
-            knn_result,
-            xgb_result,
-            svm_result,
-            neural_network_result,
-            random_forest_result,
-            voting_equal_result,
-            voting_weighted_result,
-            stacking_result,
-        )
+        _save_model_artifacts(args.model_output_dir, ordered_results)
 
 
 if __name__ == "__main__":

@@ -24,11 +24,13 @@ CATEGORICAL_FEATURES: list[str] = [
     "geo_cell",
     "room_type_neighbourhood_group",
     "room_type_availability_bucket",
+    "room_type_minimum_nights_bucket",
 ]
 TARGET_ENCODED_FEATURES: list[str] = [
     "neighbourhood",
     "geo_cell",
     "room_type_neighbourhood_group",
+    "room_type_neighbourhood",
 ]
 NUMERIC_FEATURES: list[str] = [
     "latitude",
@@ -39,6 +41,7 @@ NUMERIC_FEATURES: list[str] = [
     "reviews_per_month",
     "calculated_host_listings_count",
     "log_host_listing_count",
+    "is_professional_host",
     "availability_365",
     "has_reviews",
     "days_since_last_review",
@@ -56,6 +59,15 @@ class TrainTestData:
     y_test: pd.Series
 
 
+@dataclass(frozen=True)
+class PriceCapAudit:
+    """Summary of the global IQR price cap used for the mainstream-market model."""
+
+    upper_bound: float
+    summary: pd.DataFrame
+    excluded_by_segment: pd.DataFrame
+
+
 class TargetMeanEncoder(BaseEstimator, TransformerMixin):
     """Encode categorical columns with smoothed target means inside CV folds."""
 
@@ -69,6 +81,7 @@ class TargetMeanEncoder(BaseEstimator, TransformerMixin):
         self.feature_maps_: dict[str, dict[object, float]] = {}
         for column_name in data_frame.columns:
             grouped = target_series.groupby(data_frame[column_name], dropna=False).agg(["mean", "count"])
+            # Shrink rare category means toward the fold-level mean to reduce overfitting.
             smoothed = (
                 grouped["mean"] * grouped["count"] + self.global_mean_ * self.smoothing
             ) / (grouped["count"] + self.smoothing)
@@ -129,6 +142,7 @@ def add_engineered_features(model_data_frame: pd.DataFrame) -> pd.DataFrame:
         labels=["unavailable", "low", "seasonal", "high"],
     ).astype(str)
     model_data_frame["log_host_listing_count"] = np.log1p(model_data_frame["calculated_host_listings_count"])
+    model_data_frame["is_professional_host"] = (model_data_frame["calculated_host_listings_count"] > 1).astype(int)
     model_data_frame["host_listing_count_bucket"] = pd.cut(
         model_data_frame["calculated_host_listings_count"],
         bins=[0, 1, 5, 20, np.inf],
@@ -143,11 +157,22 @@ def add_engineered_features(model_data_frame: pd.DataFrame) -> pd.DataFrame:
     model_data_frame["room_type_availability_bucket"] = (
         model_data_frame["room_type"].astype(str) + "__" + model_data_frame["availability_bucket"].astype(str)
     )
+    model_data_frame["room_type_minimum_nights_bucket"] = (
+        model_data_frame["room_type"].astype(str) + "__" + model_data_frame["minimum_nights_bucket"].astype(str)
+    )
+    model_data_frame["room_type_neighbourhood"] = (
+        model_data_frame["room_type"].astype(str) + "__" + model_data_frame["neighbourhood"].astype(str)
+    )
     return model_data_frame
 
 
 def clean_listings_dataframe(raw_data_frame: pd.DataFrame) -> pd.DataFrame:
-    """Replicate cleaning from Linear Train.ipynb and DSB EDA."""
+    """Replicate notebook cleaning for the globally clipped mainstream-price market.
+
+    The IQR price cap is intentionally computed on all positive-price rows before
+    the train/test split. Use ``compute_price_cap_audit`` to report the rows this
+    target-dependent cap excludes from the modeled population.
+    """
     model_data_frame: pd.DataFrame = raw_data_frame.copy()
     # Normalize key nullable review fields before row-level filtering.
     model_data_frame["reviews_per_month"] = model_data_frame["reviews_per_month"].fillna(0)
@@ -175,6 +200,62 @@ def clean_listings_dataframe(raw_data_frame: pd.DataFrame) -> pd.DataFrame:
         median_value: float = float(model_data_frame[column_name].median())
         model_data_frame[column_name] = model_data_frame[column_name].fillna(median_value)
     return model_data_frame
+
+
+def _positive_price_frame_for_audit(raw_data_frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply the same row filters used before the IQR cap so the audit matches training scope."""
+    audit_frame = raw_data_frame.copy()
+    audit_frame["reviews_per_month"] = audit_frame["reviews_per_month"].fillna(0)
+    audit_frame["last_review"] = audit_frame["last_review"].fillna("No reviews")
+    audit_frame = audit_frame.dropna(subset=["name", "host_name"])
+    return audit_frame[audit_frame["price"] > 0].copy()
+
+
+def compute_price_cap_audit(raw_data_frame: pd.DataFrame) -> PriceCapAudit:
+    """Quantify which positive-price rows are excluded by the global IQR cap."""
+    positive_price_frame = _positive_price_frame_for_audit(raw_data_frame)
+    first_quartile = float(positive_price_frame["price"].quantile(0.25))
+    third_quartile = float(positive_price_frame["price"].quantile(0.75))
+    interquartile_range = third_quartile - first_quartile
+    upper_bound = third_quartile + 1.5 * interquartile_range
+    included_frame = positive_price_frame[positive_price_frame["price"] <= upper_bound]
+    excluded_frame = positive_price_frame[positive_price_frame["price"] > upper_bound]
+
+    def price_scope_row(scope: str, frame: pd.DataFrame, share_base: int) -> dict[str, float | int | str]:
+        return {
+            "scope": scope,
+            "rows": len(frame),
+            "share": len(frame) / share_base if share_base else np.nan,
+            "min_price": frame["price"].min() if len(frame) else np.nan,
+            "median_price": frame["price"].median() if len(frame) else np.nan,
+            "mean_price": frame["price"].mean() if len(frame) else np.nan,
+            "max_price": frame["price"].max() if len(frame) else np.nan,
+        }
+
+    positive_row_count = len(positive_price_frame)
+    summary = pd.DataFrame(
+        [
+            price_scope_row("positive_price_rows_before_cap", positive_price_frame, positive_row_count),
+            price_scope_row("included_after_iqr_cap", included_frame, positive_row_count),
+            price_scope_row("excluded_above_iqr_cap", excluded_frame, positive_row_count),
+        ]
+    )
+    if len(excluded_frame):
+        excluded_by_segment = (
+            excluded_frame.groupby(["neighbourhood_group", "room_type"], observed=True)
+            .agg(rows=("price", "size"), median_price=("price", "median"), mean_price=("price", "mean"))
+            .sort_values("rows", ascending=False)
+            .reset_index()
+        )
+    else:
+        excluded_by_segment = pd.DataFrame(
+            columns=["neighbourhood_group", "room_type", "rows", "median_price", "mean_price"]
+        )
+    return PriceCapAudit(
+        upper_bound=float(upper_bound),
+        summary=summary,
+        excluded_by_segment=excluded_by_segment,
+    )
 
 
 def load_train_test(

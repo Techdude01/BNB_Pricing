@@ -50,7 +50,7 @@ def build_equal_voting_pipeline(base_pipelines: dict[str, Pipeline]) -> Pipeline
     estimators: list[tuple[str, Pipeline]] = [
         (name, clone(pipeline)) for name, pipeline in base_pipelines.items()
     ]
-    return Pipeline(steps=[("model", VotingRegressor(estimators=estimators, n_jobs=-1))])
+    return Pipeline(steps=[("model", VotingRegressor(estimators=estimators, n_jobs=1))])
 
 
 def _normalize_weights(raw_weights: dict[str, float]) -> dict[str, float]:
@@ -75,7 +75,7 @@ def build_weighted_voting_pipeline(
         steps=[
             (
                 "model",
-                VotingRegressor(estimators=estimators, weights=weights, n_jobs=-1),
+                VotingRegressor(estimators=estimators, weights=weights, n_jobs=1),
             )
         ]
     )
@@ -149,7 +149,7 @@ def fit_stacking_ensemble(data: TrainTestData, base_pipelines: dict[str, Pipelin
                 StackingRegressor(
                     estimators=estimators,
                     final_estimator=final_estimator,
-                    n_jobs=-1,
+                    n_jobs=1,
                 ),
             )
         ]
