@@ -9,7 +9,7 @@ from xgboost import XGBRegressor
 from pricing_lab import config
 from pricing_lab.data import TrainTestData, build_column_transformer
 from pricing_lab.metrics import DollarMetrics, compute_dollar_metrics
-from pricing_lab.tuning import create_study, mean_cv_rmse_log
+from pricing_lab.tuning import create_study, mean_cv_rmse_log, optimize_with_logs
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ def build_xgboost_pipeline(trial: optuna.Trial) -> Pipeline:
                     reg_lambda=reg_lambda,
                     gamma=gamma,
                     random_state=config.RANDOM_STATE,
-                    n_jobs=-1,
+                    n_jobs=config.MODEL_N_JOBS,
                     tree_method="hist",
                     objective="reg:squarederror",
                 ),
@@ -77,7 +77,7 @@ def build_xgboost_pipeline_from_params(params: dict[str, float | int]) -> Pipeli
                     reg_lambda=float(params["reg_lambda"]),
                     gamma=float(params["gamma"]),
                     random_state=config.RANDOM_STATE,
-                    n_jobs=-1,
+                    n_jobs=config.MODEL_N_JOBS,
                     tree_method="hist",
                     objective="reg:squarederror",
                 ),
@@ -95,7 +95,7 @@ def tune_xgboost(data: TrainTestData, n_trials: int | None = None) -> XgboostRes
         pipeline: Pipeline = build_xgboost_pipeline(trial)
         return mean_cv_rmse_log(pipeline, data.X_train, data.y_train)
 
-    study.optimize(objective, n_trials=trials, show_progress_bar=False)
+    optimize_with_logs(study, objective, "XGBoost", trials)
     # Refit once on full training data after CV-based hyperparameter selection.
     best_params: dict[str, float | int] = {k: study.best_params[k] for k in study.best_params}
     best_pipeline: Pipeline = build_xgboost_pipeline_from_params(best_params)

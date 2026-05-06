@@ -10,8 +10,7 @@ from sklearn.pipeline import Pipeline
 
 from pricing_lab.data import TrainTestData
 from pricing_lab.metrics import DollarMetrics, compute_dollar_metrics
-from pricing_lab.tuning import create_study
-from pricing_lab.tuning import mean_cv_rmse_log
+from pricing_lab.tuning import create_study, mean_cv_rmse_log, optimize_with_logs
 
 
 @dataclass(frozen=True)
@@ -114,7 +113,7 @@ def fit_weighted_voting_ensemble(
         voting_pipeline: Pipeline = build_weighted_voting_pipeline(base_pipelines, raw_weights)
         return mean_cv_rmse_log(voting_pipeline, data.X_train, data.y_train)
 
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    optimize_with_logs(study, objective, "VotingEnsembleWeighted", n_trials)
     best_raw_weights: dict[str, float] = {
         name: float(study.best_params[f"w_{name}"])
         for name in model_names

@@ -13,7 +13,7 @@ from sklearn.preprocessing import StandardScaler
 from pricing_lab import config
 from pricing_lab.data import TrainTestData, build_column_transformer
 from pricing_lab.metrics import DollarMetrics, compute_dollar_metrics
-from pricing_lab.tuning import create_study, mean_cv_rmse_log
+from pricing_lab.tuning import create_study, mean_cv_rmse_log, optimize_with_logs
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,7 @@ def tune_elastic_net(data: TrainTestData, n_trials: int | None = None) -> Elasti
             except ConvergenceWarning:
                 return float(np.inf)
 
-    study.optimize(objective, n_trials=trials, show_progress_bar=False)
+    optimize_with_logs(study, objective, "ElasticNet", trials)
     # Refit once on full training data after CV-based hyperparameter selection.
     best_params: dict[str, float | int] = {k: study.best_params[k] for k in study.best_params}
     best_pipeline: Pipeline = build_elastic_net_pipeline_from_params(best_params)

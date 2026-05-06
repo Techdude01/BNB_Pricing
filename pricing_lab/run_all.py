@@ -6,13 +6,15 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import optuna
 import pandas as pd
-from joblib import dump
+from joblib import dump, load
 
 if __package__ is None or __package__ == "":
     # Support direct execution: python pricing_lab/run_all.py
@@ -67,6 +69,17 @@ ARTIFACT_FILENAMES: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class CheckpointedResult:
+    """Previously completed model stage loaded from disk."""
+
+    name: str
+    best_cv_rmse_log: float
+    best_params: dict[str, Any]
+    test_metrics: dict[str, float]
+    pipeline: Any
+
+
 def _result_row(
     name: str,
     best_cv_rmse_log: float,
@@ -99,16 +112,108 @@ def _collect_rows(results: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _save_model_artifacts(
+def _artifact_path(output_dir: str, result_name: str) -> Path:
+    return Path(output_dir) / ARTIFACT_FILENAMES[result_name]
+
+
+def _metadata_path(output_dir: str, result_name: str) -> Path:
+    return _artifact_path(output_dir, result_name).with_suffix(".json")
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable.")
+
+
+def _checkpoint_context(
+    mode: str,
+    train_data: TrainTestData,
+    csv_path: str | None,
+    trial_count: int | None,
+) -> dict[str, Any]:
+    resolved_csv_path = Path(csv_path).resolve() if csv_path is not None else config.DATA_PATH.resolve()
+    return {
+        "mode": mode,
+        "csv_path": str(resolved_csv_path),
+        "train_rows": len(train_data.X_train),
+        "test_rows": len(train_data.X_test),
+        "trial_count": trial_count,
+    }
+
+
+def _save_result_checkpoint(output_dir: str, result: Any, context: dict[str, Any]) -> None:
+    artifact_path = _artifact_path(output_dir, result.name)
+    metadata_path = _metadata_path(output_dir, result.name)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_artifact_path = artifact_path.with_suffix(f"{artifact_path.suffix}.tmp")
+    dump(result.pipeline, temporary_artifact_path)
+    temporary_artifact_path.replace(artifact_path)
+    payload: dict[str, Any] = {
+        "name": result.name,
+        "artifact_filename": artifact_path.name,
+        "best_cv_rmse_log": float(result.best_cv_rmse_log),
+        "best_params": dict(result.best_params),
+        "test_metrics": dict(result.test_metrics),
+        "context": context,
+    }
+    temporary_metadata_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
+    temporary_metadata_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
+        encoding="utf-8",
+    )
+    temporary_metadata_path.replace(metadata_path)
+    print(f"Checkpointed {result.name}: {artifact_path}", flush=True)
+
+
+def _load_result_checkpoint(
     output_dir: str,
-    results: list[Any],
+    result_name: str,
+    context: dict[str, Any],
+) -> CheckpointedResult | None:
+    artifact_path = _artifact_path(output_dir, result_name)
+    metadata_path = _metadata_path(output_dir, result_name)
+    if not artifact_path.exists() or not metadata_path.exists():
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("context") != context:
+        print(f"Checkpoint for {result_name} does not match this run; retraining.", flush=True)
+        return None
+    pipeline = load(artifact_path)
+    print(f"Loaded checkpoint {result_name}: {artifact_path}", flush=True)
+    return CheckpointedResult(
+        name=result_name,
+        best_cv_rmse_log=float(metadata["best_cv_rmse_log"]),
+        best_params=dict(metadata["best_params"]),
+        test_metrics={key: float(value) for key, value in metadata["test_metrics"].items()},
+        pipeline=pipeline,
+    )
+
+
+def _write_results_table(output_csv: str, results: list[Any]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = _collect_rows(results)
+    table: pd.DataFrame = pd.DataFrame(rows)
+    output_path = Path(output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(output_path, index=False)
+    print(f"Wrote {output_path}", flush=True)
+    return table
+
+
+def _record_result(
+    result: Any,
+    completed_results: list[Any],
+    output_csv: str | None,
+    model_output_dir: str | None,
+    context: dict[str, Any],
 ) -> None:
-    artifacts_dir: Path = Path(output_dir)
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    for result in results:
-        artifact_path = artifacts_dir / ARTIFACT_FILENAMES[result.name]
-        dump(result.pipeline, artifact_path)
-        print(f"Wrote {artifact_path}", flush=True)
+    completed_results.append(result)
+    if model_output_dir is not None:
+        _save_result_checkpoint(model_output_dir, result, context)
+    if output_csv is not None:
+        _write_results_table(output_csv, completed_results)
 
 
 def _resolve_trials(
@@ -300,7 +405,17 @@ def main() -> None:
         default=None,
         help="Optional directory to save fitted model artifacts (joblib files).",
     )
+    parser.add_argument(
+        "--resume-from-checkpoints",
+        action="store_true",
+        help=(
+            "Load matching completed stages from --model-output-dir instead of retraining them. "
+            "The saved metadata must match mode, CSV path, row counts, and trial count."
+        ),
+    )
     args: argparse.Namespace = parser.parse_args()
+    if args.resume_from_checkpoints and args.model_output_dir is None:
+        raise ValueError("--resume-from-checkpoints requires --model-output-dir.")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     # Use one shared split so model metrics are directly comparable.
     full_data: TrainTestData = load_train_test(csv_path=args.csv)
@@ -309,6 +424,7 @@ def main() -> None:
     if args.lite_train_rows <= 0:
         raise ValueError("--lite-train-rows must be positive.")
     train_data: TrainTestData = _build_training_data(args.mode, full_data, lite_train_rows=args.lite_train_rows)
+    print(f"Model n_jobs for XGBoost/RandomForest: {config.MODEL_N_JOBS}", flush=True)
     elastic_trials: int = _resolve_trials(
         args.n_trials_elastic,
         LITE_TRIALS_ELASTIC,
@@ -365,18 +481,69 @@ def main() -> None:
         f"EnsembleWeights: {ensemble_weight_trials}",
         flush=True,
     )
-    print("Tuning ElasticNet...", flush=True)
-    elastic_result: ElasticNetResult = tune_elastic_net(train_data, n_trials=elastic_trials)
-    print("Tuning KNN...", flush=True)
-    knn_result: KnnResult = tune_knn(train_data, n_trials=knn_trials)
-    print("Tuning XGBoost...", flush=True)
-    xgb_result: XgboostResult = tune_xgboost(train_data, n_trials=xgb_trials)
-    print("Tuning SVM...", flush=True)
-    svm_result: SvmResult = tune_svm(train_data, n_trials=svm_trials)
-    print("Tuning Neural Network...", flush=True)
-    neural_network_result: NeuralNetworkResult = tune_neural_network(train_data, n_trials=nn_trials)
-    print("Tuning Random Forest...", flush=True)
-    random_forest_result: RandomForestResult = tune_random_forest(train_data, n_trials=rf_trials)
+    completed_results: list[Any] = []
+
+    def run_stage(
+        result_name: str,
+        display_name: str,
+        trial_count: int | None,
+        runner: Callable[[], Any],
+    ) -> Any:
+        context = _checkpoint_context(args.mode, train_data, args.csv, trial_count)
+        if args.resume_from_checkpoints and args.model_output_dir is not None:
+            checkpointed_result = _load_result_checkpoint(args.model_output_dir, result_name, context)
+            if checkpointed_result is not None:
+                completed_results.append(checkpointed_result)
+                if args.output_csv is not None:
+                    _write_results_table(args.output_csv, completed_results)
+                return checkpointed_result
+        print(f"{display_name}...", flush=True)
+        result = runner()
+        _record_result(
+            result,
+            completed_results,
+            args.output_csv,
+            args.model_output_dir,
+            context,
+        )
+        return result
+
+    elastic_result: ElasticNetResult | CheckpointedResult = run_stage(
+        "ElasticNet",
+        "Tuning ElasticNet",
+        elastic_trials,
+        lambda: tune_elastic_net(train_data, n_trials=elastic_trials),
+    )
+    knn_result: KnnResult | CheckpointedResult = run_stage(
+        "KNN",
+        "Tuning KNN",
+        knn_trials,
+        lambda: tune_knn(train_data, n_trials=knn_trials),
+    )
+    xgb_result: XgboostResult | CheckpointedResult = run_stage(
+        "XGBoost",
+        "Tuning XGBoost",
+        xgb_trials,
+        lambda: tune_xgboost(train_data, n_trials=xgb_trials),
+    )
+    svm_result: SvmResult | CheckpointedResult = run_stage(
+        "SVM",
+        "Tuning SVM",
+        svm_trials,
+        lambda: tune_svm(train_data, n_trials=svm_trials),
+    )
+    neural_network_result: NeuralNetworkResult | CheckpointedResult = run_stage(
+        "NeuralNetwork",
+        "Tuning Neural Network",
+        nn_trials,
+        lambda: tune_neural_network(train_data, n_trials=nn_trials),
+    )
+    random_forest_result: RandomForestResult | CheckpointedResult = run_stage(
+        "RandomForest",
+        "Tuning Random Forest",
+        rf_trials,
+        lambda: tune_random_forest(train_data, n_trials=rf_trials),
+    )
     base_pipelines: dict[str, Any] = {
         "elastic": elastic_result.pipeline,
         "knn": knn_result.pipeline,
@@ -403,16 +570,28 @@ def main() -> None:
         "Ensemble candidates (CV-window filter): " + ", ".join(selected_pipelines.keys()),
         flush=True,
     )
-    print("Fitting equal-weight voting ensemble...", flush=True)
-    voting_equal_result: EnsembleResult = fit_equal_voting_ensemble(train_data, selected_pipelines)
-    print("Tuning weighted voting ensemble...", flush=True)
-    voting_weighted_result: EnsembleResult = fit_weighted_voting_ensemble(
-        train_data,
-        selected_pipelines,
-        n_trials=ensemble_weight_trials,
+    voting_equal_result: EnsembleResult | CheckpointedResult = run_stage(
+        "VotingEnsembleEqual",
+        "Fitting equal-weight voting ensemble",
+        None,
+        lambda: fit_equal_voting_ensemble(train_data, selected_pipelines),
     )
-    print("Fitting stacking ensemble...", flush=True)
-    stacking_result: EnsembleResult = fit_stacking_ensemble(train_data, selected_pipelines)
+    voting_weighted_result: EnsembleResult | CheckpointedResult = run_stage(
+        "VotingEnsembleWeighted",
+        "Tuning weighted voting ensemble",
+        ensemble_weight_trials,
+        lambda: fit_weighted_voting_ensemble(
+            train_data,
+            selected_pipelines,
+            n_trials=ensemble_weight_trials,
+        ),
+    )
+    stacking_result: EnsembleResult | CheckpointedResult = run_stage(
+        "StackingEnsemble",
+        "Fitting stacking ensemble",
+        None,
+        lambda: fit_stacking_ensemble(train_data, selected_pipelines),
+    )
     ordered_results: list[Any] = [
         elastic_result,
         knn_result,
@@ -429,10 +608,7 @@ def main() -> None:
     table: pd.DataFrame = pd.DataFrame(rows)
     print(table.to_string(index=False), flush=True)
     if args.output_csv is not None:
-        table.to_csv(args.output_csv, index=False)
-        print(f"Wrote {args.output_csv}", flush=True)
-    if args.model_output_dir is not None:
-        _save_model_artifacts(args.model_output_dir, ordered_results)
+        _write_results_table(args.output_csv, ordered_results)
 
 
 if __name__ == "__main__":

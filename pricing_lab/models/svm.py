@@ -10,7 +10,7 @@ from sklearn.svm import SVR
 from pricing_lab import config
 from pricing_lab.data import TrainTestData, build_column_transformer
 from pricing_lab.metrics import DollarMetrics, compute_dollar_metrics
-from pricing_lab.tuning import create_study, mean_cv_rmse_log
+from pricing_lab.tuning import create_study, mean_cv_rmse_log, optimize_with_logs
 
 
 @dataclass(frozen=True)
@@ -26,9 +26,9 @@ class SvmResult:
 
 def build_svm_pipeline(trial: optuna.Trial) -> Pipeline:
     """Sample hyperparameters from Optuna and return an unfitted pipeline."""
-    c_value: float = trial.suggest_float("C", 1e-2, 200.0, log=True)
-    epsilon: float = trial.suggest_float("epsilon", 1e-4, 1.0, log=True)
-    gamma: str = trial.suggest_categorical("gamma", ["scale", "auto"])
+    c_value: float = trial.suggest_float("C", 0.05, 1.0, log=True)
+    epsilon: float = trial.suggest_float("epsilon", 0.3, 0.8, log=True)
+    gamma: str = "scale"
     return Pipeline(
         steps=[
             ("prep", build_column_transformer()),
@@ -74,8 +74,9 @@ def tune_svm(data: TrainTestData, n_trials: int | None = None) -> SvmResult:
         pipeline: Pipeline = build_svm_pipeline(trial)
         return mean_cv_rmse_log(pipeline, data.X_train, data.y_train)
 
-    study.optimize(objective, n_trials=trials, show_progress_bar=False)
+    optimize_with_logs(study, objective, "SVM", trials)
     best_params: dict[str, float | int | str] = {k: study.best_params[k] for k in study.best_params}
+    best_params["gamma"] = "scale"
     best_pipeline: Pipeline = build_svm_pipeline_from_params(best_params)
     best_pipeline.fit(data.X_train, data.y_train)
     y_pred_log = best_pipeline.predict(data.X_test)

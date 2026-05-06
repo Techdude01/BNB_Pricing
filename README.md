@@ -69,6 +69,32 @@ Optional trial overrides include `--n-trials-elastic`, `--n-trials-knn`,
 `--n-trials-xgb`, `--n-trials-svm`, `--n-trials-nn`, `--n-trials-rf`, and
 `--n-trials-ensemble-weights`.
 
+To checkpoint long runs, provide artifact and metrics paths:
+
+```bash
+export BNB_MODEL_N_JOBS=6
+python -m pricing_lab.run_all --mode full \
+  --output-csv artifacts/full_metrics.csv \
+  --model-output-dir artifacts/models
+```
+
+Each completed stage writes its `.joblib` and JSON metadata immediately, and
+the metrics CSV is refreshed after every stage. Optuna stages also print one
+start/finish line per trial with current and best log-RMSE. If a run stops
+partway through, resume matching completed stages with:
+
+```bash
+export BNB_MODEL_N_JOBS=6
+python -m pricing_lab.run_all --mode full \
+  --output-csv artifacts/full_metrics.csv \
+  --model-output-dir artifacts/models \
+  --resume-from-checkpoints
+```
+
+`BNB_MODEL_N_JOBS` caps the internal thread fanout for XGBoost and Random
+Forest. It defaults to `6` for Apple Silicon-friendly full runs; set `-1` to
+restore each estimator's all-cores behavior.
+
 ## Tests
 
 `pytest` is not required for this repo. Use the standard-library test runner:
