@@ -20,6 +20,10 @@ held-out dollar-scale metrics, and analyzes model errors.
   the recommended workflow.
 - `artifacts/`: generated model files and analysis outputs. This directory is
   intentionally ignored by git.
+## Results Notes
+Training modes were different in the presentation and report. 
+We used Sample for the presentation due to time concerns with the full dataset, 
+and the full version was used in the report. The overall results are similar.
 
 ## Environment Setup
 
